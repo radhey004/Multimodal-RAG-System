@@ -1,0 +1,44 @@
+
+# Core
+numpy>=1.26,<3
+pandas>=2.2,<3
+tqdm>=4.66,<5
+python-dotenv>=1.0,<2
+
+# PDF Processing
+PyMuPDF>=1.24,<2
+pdfplumber>=0.11,<1
+
+# Image Processing
+Pillow>=10,<12
+
+# OCR
+pytesseract>=0.3.13,<1
+
+# CLIP / PyTorch
+
+torch>=2.2,<3
+torchvision>=0.17,<1
+transformers>=4.40,<5
+
+# Vector Database
+pinecone[grpc]>=7,<8
+
+# Ollama
+ollama>=0.3,<1
+
+# Text Splitting
+langchain-text-splitters>=0.2,<2
+
+# Office Documents
+python-docx>=1.1,<2
+python-pptx>=0.6.23,<2
+openpyxl>=3.1,<4
+xlrd>=2.0,<3
+
+#reranker dependency
+sentence-transformers>=3.0,<6
+
+# Jupyter
+ipykernel>=6.29,<7
+gradio>=4.44,<6
