@@ -1,22 +1,9 @@
-from fastapi import (
-    APIRouter,
-    Depends
-)
-
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
-from app.utils.auth import (
-    get_current_user
-)
-
-from app.services.database import (
-    get_documents_by_user
-)
-
-from app.services.rag_service import (
-    ask_question
-)
-
+from app.services.database import get_documents_by_user
+from app.services.rag_service import ask_question
+from app.utils.auth import get_current_user
 
 router = APIRouter(
     prefix="/api/chat",
@@ -31,25 +18,23 @@ class ChatRequest(BaseModel):
 @router.post("/")
 def chat(
     data: ChatRequest,
-    user_id: str = Depends(
-        get_current_user
-    )
+    user_id: str = Depends(get_current_user)
 ):
+    if not data.query.strip():
+        return {
+            "answer": "Please enter a question.",
+            "sources": []
+        }
 
-    documents = get_documents_by_user(
-        user_id
-    )
+    documents = get_documents_by_user(user_id)
 
-    document_names = {
-        document["document_id"]:
-            document["file_name"]
-        for document in documents
+    names = {
+        d["document_id"]: d["file_name"]
+        for d in documents
     }
 
-    result = ask_question(
-        data.query,
+    return ask_question(
+        data.query.strip(),
         user_id,
-        document_names
+        names
     )
-
-    return result

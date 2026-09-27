@@ -1,4 +1,3 @@
-import os
 import shutil
 import uuid
 from datetime import datetime, timezone
@@ -9,31 +8,25 @@ import cloudinary.uploader
 
 from fastapi import (
     APIRouter,
-    UploadFile,
-    File,
     Depends,
-    HTTPException
+    File,
+    HTTPException,
+    UploadFile
 )
+
+from fastapi.responses import RedirectResponse
 
 from pydantic import BaseModel
 
 from app.config import settings
 
-from app.utils.auth import (
-    get_current_user
-)
-
-from app.utils.file_hash import (
-    calculate_file_hash
-)
-
 from app.services.database import (
+    create_document,
+    delete_document,
+    get_document,
     get_document_by_hash,
     get_documents_by_user,
-    create_document,
-    get_document,
-    rename_document,
-    delete_document
+    rename_document
 )
 
 from app.services.document_service import (
@@ -42,11 +35,19 @@ from app.services.document_service import (
 )
 
 from app.services.rag_service import (
+    delete_document_vectors,
     embed_items,
-    upload_vectors,
-    delete_document_vectors
+    upload_vectors
 )
 
+from app.utils.auth import get_current_user
+
+from app.utils.file_hash import calculate_file_hash
+
+
+# =========================================================
+# Router
+# =========================================================
 
 router = APIRouter(
     prefix="/api/documents",
@@ -54,39 +55,102 @@ router = APIRouter(
 )
 
 
+# =========================================================
+# Cloudinary Configuration
+# =========================================================
+
 cloudinary.config(
-    cloud_name=
-        settings.CLOUDINARY_CLOUD_NAME,
-    api_key=
-        settings.CLOUDINARY_API_KEY,
-    api_secret=
-        settings.CLOUDINARY_API_SECRET,
+    cloud_name=settings.CLOUDINARY_CLOUD_NAME,
+    api_key=settings.CLOUDINARY_API_KEY,
+    api_secret=settings.CLOUDINARY_API_SECRET,
     secure=True
 )
 
+
+# =========================================================
+# Request Models
+# =========================================================
 
 class RenameRequest(BaseModel):
     file_name: str
 
 
-def upload_to_cloudinary(
-    file_path: str,
-    original_name: str
-):
+# =========================================================
+# Cloudinary Upload
+# =========================================================
 
-    result = cloudinary.uploader.upload(
-        file_path,
-        resource_type="auto",
-        folder="multimodal-rag",
-        public_id=(
-            Path(original_name).stem
-            + "_"
-            + uuid.uuid4().hex
+def upload_cloudinary(
+    path: str,
+    name: str
+):
+    """
+    Upload documents to Cloudinary.
+
+    PDFs are uploaded as RAW resources because they
+    should not be delivered as image resources.
+
+    Other supported files continue using auto detection.
+    """
+
+    extension = Path(name).suffix.lower()
+
+    public_id = (
+        f"{Path(name).stem}_{uuid.uuid4().hex}"
+    )
+
+    # -----------------------------------------------------
+    # PDF
+    # -----------------------------------------------------
+
+    if extension == ".pdf":
+
+        result = cloudinary.uploader.upload(
+            path,
+            resource_type="raw",
+            type="upload",
+            folder="multimodal-rag",
+            public_id=public_id
         )
+
+    # -----------------------------------------------------
+    # Other files
+    # -----------------------------------------------------
+
+    else:
+
+        result = cloudinary.uploader.upload(
+            path,
+            resource_type="auto",
+            type="upload",
+            folder="multimodal-rag",
+            public_id=public_id
+        )
+
+    print(
+        "Cloudinary upload successful:"
+    )
+
+    print(
+        f"  Resource type: "
+        f"{result.get('resource_type')}"
+    )
+
+    print(
+        f"  Delivery type: "
+        f"{result.get('type')}"
+    )
+
+    print(
+        f"  URL: "
+        f"{result.get('secure_url')}"
     )
 
     return result["secure_url"]
 
+
+# =========================================================
+# Upload Documents
+# =========================================================
 
 @router.post("/upload")
 async def upload_documents(
@@ -94,283 +158,192 @@ async def upload_documents(
     user_id: str = Depends(get_current_user)
 ):
 
-    print("\n")
-    print("=" * 70)
-    print("🔥🔥🔥 DOCUMENT UPLOAD STARTED 🔥🔥🔥")
-    print("=" * 70)
-    print(f"Authenticated user_id: {user_id}")
-    print(f"Number of files: {len(files)}")
+    # -----------------------------------------------------
+    # User upload directory
+    # -----------------------------------------------------
 
-    results = []
-
-    user_upload_dir = (
-        Path("data")
-        / "uploads"
+    directory = (
+        Path("data/uploads")
         / user_id
     )
 
-    user_upload_dir.mkdir(
+    directory.mkdir(
         parents=True,
         exist_ok=True
     )
 
-    for file in files:
+    results = []
 
-        print("\n" + "-" * 70)
-        print(f"Processing file: {file.filename}")
-        print("-" * 70)
+    # =====================================================
+    # Process each file
+    # =====================================================
+
+    for file in files:
 
         extension = Path(
             file.filename
         ).suffix.lower()
 
-        print(f"Extension: {extension}")
-
-        # ==================================================
-        # Extension validation
-        # ==================================================
+        # -------------------------------------------------
+        # Validate extension
+        # -------------------------------------------------
 
         if extension not in SUPPORTED_EXTENSIONS:
 
-            print(
-                f"❌ Unsupported extension: {extension}"
-            )
-
             results.append({
-                "file_name":
-                    file.filename,
-                "status":
-                    "rejected",
-                "message":
-                    "Unsupported file type"
+                "file_name": file.filename,
+                "status": "rejected",
+                "message": "Unsupported file type"
             })
 
             continue
 
-        print("✅ Extension supported")
+        # -------------------------------------------------
+        # Temporary file path
+        # -------------------------------------------------
 
-        temp_path = (
-            user_upload_dir
-            / (
-                uuid.uuid4().hex
-                + extension
-            )
+        path = (
+            directory
+            / f"{uuid.uuid4().hex}{extension}"
         )
 
         try:
 
-            # ==================================================
+            # =============================================
             # Save temporary file
-            # ==================================================
+            # =============================================
 
-            print(
-                f"Saving file to: {temp_path}"
-            )
-
-            with open(
-                temp_path,
-                "wb"
-            ) as buffer:
+            with path.open("wb") as output:
 
                 shutil.copyfileobj(
                     file.file,
-                    buffer
+                    output
                 )
 
-            print("✅ File saved")
+            # =============================================
+            # File size validation
+            # =============================================
 
-            # ==================================================
-            # SHA-256
-            # ==================================================
+            max_size = (
+                settings.MAX_FILE_SIZE_MB
+                * 1024
+                * 1024
+            )
 
-            print("Calculating SHA-256...")
+            if path.stat().st_size > max_size:
+
+                raise ValueError(
+                    f"File exceeds "
+                    f"{settings.MAX_FILE_SIZE_MB} MB"
+                )
+
+            # =============================================
+            # Calculate file hash
+            # =============================================
 
             file_hash = calculate_file_hash(
-                str(temp_path)
+                str(path)
             )
 
-            print(
-                f"File hash: {file_hash}"
-            )
-
-            # ==================================================
+            # =============================================
             # Duplicate check
-            # ==================================================
+            # =============================================
 
-            print(
-                "Checking for duplicate..."
-            )
-
-            duplicate = get_document_by_hash(
+            if get_document_by_hash(
                 file_hash,
                 user_id
-            )
-
-            if duplicate:
-
-                print(
-                    "❌ DUPLICATE FILE DETECTED"
-                )
-
-                temp_path.unlink(
-                    missing_ok=True
-                )
+            ):
 
                 results.append({
-                    "file_name":
-                        file.filename,
-                    "status":
-                        "duplicate",
-                    "message":
-                        "This file has already been uploaded"
+                    "file_name": file.filename,
+                    "status": "duplicate",
+                    "message": "File already uploaded"
                 })
 
                 continue
 
-            print("✅ File is not a duplicate")
-
-            # ==================================================
-            # Document metadata
-            # ==================================================
-
-            document_id = str(
-                uuid.uuid4()
-            )
-
-            print(
-                f"Document ID: {document_id}"
-            )
+            # =============================================
+            # Create document metadata
+            # =============================================
 
             document = {
-                "document_id":
-                    document_id,
 
-                "user_id":
-                    user_id,
+                "document_id": str(
+                    uuid.uuid4()
+                ),
 
-                "file_name":
-                    file.filename,
+                "user_id": user_id,
 
-                "file_hash":
-                    file_hash,
+                "file_name": file.filename,
 
-                "extension":
-                    extension,
+                "file_hash": file_hash,
 
-                "created_at":
-                    datetime.now(
-                        timezone.utc
-                    )
+                "extension": extension,
+
+                "created_at": datetime.now(
+                    timezone.utc
+                )
             }
 
-            # ==================================================
-            # Cloudinary
-            # ==================================================
+            # =============================================
+            # Upload to Cloudinary
+            # =============================================
 
-            print(
-                "Uploading to Cloudinary..."
-            )
-
-            cloudinary_url = (
-                upload_to_cloudinary(
-                    str(temp_path),
+            document["cloudinary_url"] = (
+                upload_cloudinary(
+                    str(path),
                     file.filename
                 )
             )
 
-            print(
-                f"✅ Cloudinary upload complete"
-            )
+            # =============================================
+            # Process document
+            # =============================================
 
-            document[
-                "cloudinary_url"
-            ] = cloudinary_url
-
-            # ==================================================
-            # Document processing
-            # ==================================================
-
-            processing_document = {
+            items = process_document({
                 **document,
-                "filepath":
-                    str(temp_path)
-            }
+                "filepath": str(path)
+            })
 
-            print(
-                "Processing document..."
-            )
+            if not items:
 
-            items = process_document(
-                processing_document
-            )
+                raise ValueError(
+                    "No readable content found"
+                )
 
-            print(
-                f"✅ Document processing complete"
-            )
-
-            print(
-                f"Extracted items: {len(items)}"
-            )
-
-            # ==================================================
-            # Embeddings
-            # ==================================================
-
-            print(
-                "Generating embeddings..."
-            )
+            # =============================================
+            # Generate embeddings
+            # =============================================
 
             items = embed_items(
                 items
             )
 
-            print(
-                f"✅ Embeddings generated: "
-                f"{len(items)}"
-            )
-
-            # ==================================================
-            # Pinecone
-            # ==================================================
-
-            print("")
-            print("🚀 ABOUT TO CALL upload_vectors()")
-            print(
-                f"User ID being passed: {user_id}"
-            )
+            # =============================================
+            # Upload vectors
+            # =============================================
 
             upload_vectors(
                 items,
                 user_id
             )
 
-            print(
-                "✅ upload_vectors() COMPLETED"
-            )
-
-            # ==================================================
-            # MongoDB
-            # ==================================================
-
-            print(
-                "Saving document metadata to MongoDB..."
-            )
+            # =============================================
+            # Save MongoDB metadata
+            # =============================================
 
             create_document(
                 document
             )
 
-            print(
-                "✅ MongoDB document created"
-            )
-
-            # ==================================================
+            # =============================================
             # Success
-            # ==================================================
+            # =============================================
 
             results.append({
+
                 "document_id":
-                    document_id,
+                    document["document_id"],
 
                 "file_name":
                     file.filename,
@@ -379,46 +352,17 @@ async def upload_documents(
                     "success",
 
                 "message":
-                    "File uploaded and indexed successfully"
+                    "File uploaded and indexed"
             })
 
-            print(
-                f"🎉 SUCCESS: {file.filename}"
-            )
-
-        except Exception as error:
-
-            print("")
-            print(
-                "❌❌❌ UPLOAD ERROR ❌❌❌"
-            )
+        except Exception as exc:
 
             print(
-                f"File: {file.filename}"
-            )
-
-            print(
-                f"Error type: "
-                f"{type(error).__name__}"
-            )
-
-            print(
-                f"Error: {error}"
-            )
-
-            import traceback
-
-            traceback.print_exc()
-
-            print(
-                "❌❌❌ END ERROR ❌❌❌"
-            )
-
-            temp_path.unlink(
-                missing_ok=True
+                f"Document upload error: {exc}"
             )
 
             results.append({
+
                 "file_name":
                     file.filename,
 
@@ -426,21 +370,27 @@ async def upload_documents(
                     "error",
 
                 "message":
-                    str(error)
+                    str(exc)
             })
 
-    print("")
-    print("=" * 70)
-    print("🔥 DOCUMENT UPLOAD FINISHED 🔥")
-    print("=" * 70)
-    print(f"Results: {results}")
-    print("=" * 70)
-    print("")
+        finally:
+
+            # ---------------------------------------------
+            # Remove temporary file
+            # ---------------------------------------------
+
+            path.unlink(
+                missing_ok=True
+            )
 
     return {
-        "results":
-            results
+        "results": results
     }
+
+
+# =========================================================
+# List Documents
+# =========================================================
 
 @router.get("/")
 def list_documents(
@@ -453,35 +403,117 @@ def list_documents(
         user_id
     )
 
-    result = []
-
-    for document in documents:
-
-        result.append({
-            "document_id":
-                document["document_id"],
-            "file_name":
-                document["file_name"],
-            "extension":
-                document.get(
-                    "extension",
-                    ""
-                ),
-            "cloudinary_url":
-                document.get(
-                    "cloudinary_url"
-                ),
-            "created_at":
-                document.get(
-                    "created_at"
-                )
-        })
-
     return {
-        "documents":
-            result
+
+        "documents": [
+
+            {
+                "document_id":
+                    document["document_id"],
+
+                "file_name":
+                    document["file_name"],
+
+                "extension":
+                    document.get(
+                        "extension",
+                        ""
+                    ),
+
+                "cloudinary_url":
+                    document.get(
+                        "cloudinary_url"
+                    ),
+
+                "created_at":
+                    document.get(
+                        "created_at"
+                    )
+            }
+
+            for document in documents
+        ]
     }
 
+
+# =========================================================
+# PDF Preview
+# =========================================================
+#
+# IMPORTANT:
+# This endpoint checks the authenticated user first.
+# After that, it redirects the browser to the Cloudinary
+# PDF URL.
+#
+# New PDFs uploaded using the code above will have:
+#
+#     /raw/upload/
+#
+# instead of:
+#
+#     /image/upload/
+#
+# =========================================================
+
+# =========================================================
+# PDF Preview Endpoint
+# =========================================================
+
+@router.get("/{document_id}/pdf")
+def preview_pdf(
+    document_id: str,
+    user_id: str = Depends(
+        get_current_user
+    )
+):
+    """
+    Return the Cloudinary PDF URL after
+    authenticating the user.
+    """
+
+    document = get_document(
+        document_id,
+        user_id
+    )
+
+    if not document:
+
+        raise HTTPException(
+            status_code=404,
+            detail="Document not found"
+        )
+
+    extension = (
+        document.get("extension", "")
+        .lower()
+    )
+
+    if extension != ".pdf":
+
+        raise HTTPException(
+            status_code=400,
+            detail="This document is not a PDF"
+        )
+
+    cloudinary_url = document.get(
+        "cloudinary_url"
+    )
+
+    if not cloudinary_url:
+
+        raise HTTPException(
+            status_code=404,
+            detail="PDF URL not found"
+        )
+
+    return {
+        "url": cloudinary_url
+    }
+
+
+# =========================================================
+# Get Single Document
+# =========================================================
 
 @router.get("/{document_id}")
 def get_single_document(
@@ -504,17 +536,25 @@ def get_single_document(
         )
 
     return {
+
         "document": {
+
             "document_id":
                 document["document_id"],
+
             "file_name":
                 document["file_name"],
+
             "cloudinary_url":
-                document["cloudinary_url"],
+                document.get(
+                    "cloudinary_url"
+                ),
+
             "extension":
                 document.get(
                     "extension"
                 ),
+
             "created_at":
                 document.get(
                     "created_at"
@@ -522,6 +562,10 @@ def get_single_document(
         }
     }
 
+
+# =========================================================
+# Rename Document
+# =========================================================
 
 @router.patch("/{document_id}")
 def rename(
@@ -532,7 +576,9 @@ def rename(
     )
 ):
 
-    if not data.file_name.strip():
+    name = data.file_name.strip()
+
+    if not name:
 
         raise HTTPException(
             status_code=400,
@@ -554,7 +600,7 @@ def rename(
     rename_document(
         document_id,
         user_id,
-        data.file_name.strip()
+        name
     )
 
     return {
@@ -562,6 +608,10 @@ def rename(
             "Document renamed successfully"
     }
 
+
+# =========================================================
+# Delete Document
+# =========================================================
 
 @router.delete("/{document_id}")
 def delete(
@@ -583,13 +633,19 @@ def delete(
             detail="Document not found"
         )
 
-    # Delete Pinecone vectors
+    # -----------------------------------------------------
+    # Delete vectors
+    # -----------------------------------------------------
+
     delete_document_vectors(
         document_id,
         user_id
     )
 
+    # -----------------------------------------------------
     # Delete MongoDB metadata
+    # -----------------------------------------------------
+
     delete_document(
         document_id,
         user_id

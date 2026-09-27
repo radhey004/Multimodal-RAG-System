@@ -1,39 +1,40 @@
 from datetime import datetime, timedelta, timezone
-
+from fastapi import Header, HTTPException, status
 import bcrypt
 import jwt
-from fastapi import HTTPException, status, Header
 
 from app.config import settings
 
 
 def hash_password(password: str) -> str:
     return bcrypt.hashpw(
-        password.encode("utf-8"),
-        bcrypt.gensalt()
-    ).decode("utf-8")
+        password.encode(), bcrypt.gensalt()
+    ).decode()
 
 
-def verify_password(
-    password: str,
-    hashed_password: str
-) -> bool:
-    return bcrypt.checkpw(
-        password.encode("utf-8"),
-        hashed_password.encode("utf-8")
+def verify_password(password: str, hashed: str) -> bool:
+    try:
+        return bcrypt.checkpw(
+            password.encode(), hashed.encode()
+        )
+    except (ValueError, TypeError):
+        return False
+
+
+def valid_password(password: str) -> bool:
+    return (
+        len(password) >= 8
+        and any(c.isalpha() for c in password)
+        and any(c.isdigit() for c in password)
     )
 
 
-def create_access_token(user_id: str):
-    expire = datetime.now(timezone.utc) + timedelta(
-        minutes=settings.JWT_EXPIRE_MINUTES
-    )
-
+def create_access_token(user_id: str) -> str:
     payload = {
         "user_id": user_id,
-        "exp": expire
+        "exp": datetime.now(timezone.utc)
+        + timedelta(minutes=settings.JWT_EXPIRE_MINUTES)
     }
-
     return jwt.encode(
         payload,
         settings.JWT_SECRET,
@@ -43,46 +44,24 @@ def create_access_token(user_id: str):
 
 def get_current_user(
     authorization: str = Header(None)
-):
-    if not authorization:
+) -> str:
+    if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Authorization header missing"
+            detail="Authentication required"
         )
-
-    if not authorization.startswith("Bearer "):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid authorization format"
-        )
-
-    token = authorization.split(" ", 1)[1]
 
     try:
         payload = jwt.decode(
-            token,
+            authorization.split(" ", 1)[1],
             settings.JWT_SECRET,
             algorithms=[settings.JWT_ALGORITHM]
         )
-
-        user_id = payload.get("user_id")
-
-        if not user_id:
-            raise HTTPException(
-                status_code=401,
-                detail="Invalid token"
-            )
-
-        return user_id
+        if not payload.get("user_id"):
+            raise ValueError
+        return payload["user_id"]
 
     except jwt.ExpiredSignatureError:
-        raise HTTPException(
-            status_code=401,
-            detail="Token expired"
-        )
-
+        raise HTTPException(401, "Session expired")
     except jwt.InvalidTokenError:
-        raise HTTPException(
-            status_code=401,
-            detail="Invalid token"
-        )
+        raise HTTPException(401, "Invalid session")

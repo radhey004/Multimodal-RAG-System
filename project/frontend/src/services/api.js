@@ -2,24 +2,22 @@ const API_URL =
   import.meta.env.VITE_API_URL ||
   "http://localhost:8000/api";
 
-function getToken() {
-  return localStorage.getItem("token");
-}
+const token = () => localStorage.getItem("token");
 
 
-async function request(
-  endpoint,
-  options = {}
-) {
-  const token = getToken();
+// =====================================================
+// Existing request function
+// =====================================================
+
+async function request(endpoint, options = {}) {
 
   const headers = {
     ...(options.headers || {})
   };
 
-  if (token) {
+  if (token()) {
     headers.Authorization =
-      `Bearer ${token}`;
+      `Bearer ${token()}`;
   }
 
   const response = await fetch(
@@ -31,14 +29,19 @@ async function request(
   );
 
   const data =
-    await response.json()
-      .catch(() => ({}));
+    await response.json().catch(() => ({}));
 
   if (!response.ok) {
+
+    if (response.status === 401) {
+      localStorage.removeItem("token");
+      localStorage.removeItem("user");
+    }
+
     throw new Error(
       data.detail ||
       data.message ||
-      "Something went wrong"
+      "Request failed"
     );
   }
 
@@ -46,150 +49,207 @@ async function request(
 }
 
 
-// =========================
-// Authentication
-// =========================
+// =====================================================
+// Your existing APIs
+// =====================================================
 
-export async function register(
-  name,
+const json = (body) => ({
+  method: "POST",
+  headers: {
+    "Content-Type": "application/json"
+  },
+  body: JSON.stringify(body)
+});
+
+
+export const register = (
+  full_name,
   email,
-  password
-) {
-  return request(
+  password,
+  confirm_password
+) =>
+  request(
     "/auth/register",
-    {
-      method: "POST",
-      headers: {
-        "Content-Type":
-          "application/json"
-      },
-      body: JSON.stringify({
-        name,
-        email,
-        password
-      })
-    }
+    json({
+      full_name,
+      email,
+      password,
+      confirm_password
+    })
   );
-}
 
 
-export async function login(
+export const login = (
   email,
   password
-) {
-  return request(
+) =>
+  request(
     "/auth/login",
+    json({
+      email,
+      password
+    })
+  );
+
+
+export const googleLogin = (
+  id_token
+) =>
+  request(
+    "/auth/google",
+    json({
+      id_token
+    })
+  );
+
+
+export const forgotPassword = (
+  email
+) =>
+  request(
+    "/auth/forgot-password",
+    json({
+      email
+    })
+  );
+
+
+export const resetPassword = (
+  tokenValue,
+  password,
+  confirm_password
+) =>
+  request(
+    "/auth/reset-password",
+    json({
+      token: tokenValue,
+      password,
+      confirm_password
+    })
+  );
+
+
+export const updateProfile = (data) =>
+  request(
+    "/auth/profile",
     {
-      method: "POST",
+      method: "PATCH",
       headers: {
-        "Content-Type":
-          "application/json"
+        "Content-Type": "application/json"
       },
-      body: JSON.stringify({
-        email,
-        password
-      })
+      body: JSON.stringify(data)
     }
   );
-}
 
 
-// =========================
-// Documents
-// =========================
-
-export async function getDocuments() {
-  return request(
-    "/documents/"
-  );
-}
+export const getDocuments = () =>
+  request("/documents/");
 
 
-export async function uploadDocuments(
-  files
-) {
-  const formData =
-    new FormData();
+export async function uploadDocuments(files) {
 
-  files.forEach(
-    (file) => {
-      formData.append(
-        "files",
-        file
-      );
-    }
+  const form = new FormData();
+
+  files.forEach(file =>
+    form.append("files", file)
   );
 
   return request(
     "/documents/upload",
     {
       method: "POST",
-      body: formData
+      body: form
     }
   );
 }
 
 
-export async function getDocument(
-  documentId
-) {
-  return request(
-    `/documents/${documentId}`
-  );
-}
+export const getDocument = id =>
+  request(`/documents/${id}`);
 
 
-export async function renameDocument(
-  documentId,
-  fileName
-) {
-  return request(
-    `/documents/${documentId}`,
+export const renameDocument = (
+  id,
+  file_name
+) =>
+  request(
+    `/documents/${id}`,
     {
       method: "PATCH",
       headers: {
-        "Content-Type":
-          "application/json"
+        "Content-Type": "application/json"
       },
       body: JSON.stringify({
-        file_name:
-          fileName
+        file_name
       })
     }
   );
-}
 
 
-export async function deleteDocument(
-  documentId
-) {
-  return request(
-    `/documents/${documentId}`,
+export const deleteDocument = id =>
+  request(
+    `/documents/${id}`,
     {
       method: "DELETE"
     }
   );
-}
 
 
-// =========================
-// Chat
-// =========================
-
-export async function askQuestion(
-  query
-) {
-  return request(
+export const askQuestion = query =>
+  request(
     "/chat/",
+    json({
+      query
+    })
+  );
+
+
+// =====================================================
+// PDF VIEWER
+// =====================================================
+
+export async function getDocumentPdf(documentId) {
+
+  const authToken =
+    localStorage.getItem("token");
+
+  if (!authToken) {
+    throw new Error(
+      "Authentication required"
+    );
+  }
+
+  const response = await fetch(
+    `${API_URL}/documents/${documentId}/pdf`,
     {
-      method: "POST",
+      method: "GET",
       headers: {
-        "Content-Type":
-          "application/json"
-      },
-      body: JSON.stringify({
-        query
-      })
+        Authorization:
+          `Bearer ${authToken}`
+      }
     }
   );
+
+  const data =
+    await response.json()
+      .catch(() => ({}));
+
+  if (!response.ok) {
+
+    throw new Error(
+      data.detail ||
+      "Failed to load PDF"
+    );
+
+  }
+
+  if (!data.url) {
+
+    throw new Error(
+      "PDF URL not found"
+    );
+
+  }
+
+  return data.url;
 }
